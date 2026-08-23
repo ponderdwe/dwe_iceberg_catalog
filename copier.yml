@@ -1,0 +1,202 @@
+_dwe_hub:
+  hub_name: iceberg_catalog
+  display_name: "Apache Iceberg Catalog (Nessie)"
+  description: "Project Nessie git-like Iceberg catalog, backed by managed PostgreSQL"
+  icon: "database"
+  git_providers:
+    - github
+    - gitlab
+  cloud_providers:
+    - azure
+    - aws
+  services:
+    - name: Nessie
+      description: "Git-like Iceberg catalog — REST API on port 19120"
+    - name: Application Gateway
+      description: "HTTP→HTTPS redirect + HTTPS termination (Azure)"
+      kg:
+        trigger_secret: APP_GW_SUBNET_ID
+        properties:
+          endpoint: DNS_RECORD_NAME
+    - name: DNS
+      description: "DNS A/CNAME record pointing to the catalog endpoint"
+      kg:
+        trigger_secret: DNS_ZONE_NAME
+        properties:
+          hostname: DNS_RECORD_NAME
+  depends_on: []
+  kg_pulumi_outputs:
+    url: url
+    appgw_name: appgw_name
+    vmss_name: vmss_name
+  ci_templates:
+    github: ci-templates/github.yaml
+    gitlab: ci-templates/gitlab.yaml
+  required_secrets:
+    # ── CI secrets: Azure ──────────────────────────────────────────────────────
+    - key: AZURE_CLIENT_ID
+      description: "Service principal client ID"
+      destination: ci
+      cloud_provider: azure
+    - key: AZURE_CLIENT_SECRET
+      description: "Service principal client secret"
+      destination: ci
+      cloud_provider: azure
+    - key: AZURE_TENANT_ID
+      description: "Azure AD tenant ID"
+      destination: ci
+      cloud_provider: azure
+    - key: AZURE_SUBSCRIPTION_ID
+      description: "Azure subscription ID"
+      destination: ci
+      cloud_provider: azure
+    - key: AZURE_STORAGE_ACCOUNT
+      description: "Storage account name for Pulumi state backend"
+      destination: ci
+      cloud_provider: azure
+    - key: PULUMI_AZURE_STATE
+      description: "Azure Blob Storage URL for Pulumi state, e.g. azblob://deploy-state/catalog-state"
+      destination: ci
+      cloud_provider: azure
+    - key: RESOURCE_GROUP
+      description: "Azure resource group name"
+      destination: ci
+      cloud_provider: azure
+    - key: KEY_VAULT_NAME
+      description: "Azure Key Vault holding the DWE_DEPLOY_ICEBERG_CATALOG secret"
+      destination: ci
+      cloud_provider: azure
+    # ── CI secrets: AWS ────────────────────────────────────────────────────────
+    - key: AWS_ACCESS_KEY_ID
+      description: "AWS access key for Pulumi"
+      destination: ci
+      cloud_provider: aws
+    - key: AWS_SECRET_ACCESS_KEY
+      description: "AWS secret key for Pulumi"
+      destination: ci
+      cloud_provider: aws
+    - key: PULUMI_S3_STATE
+      description: "S3 URL for Pulumi state backend, e.g. s3://my-pulumi-state-bucket"
+      destination: ci
+      cloud_provider: aws
+    # ── Secrets Manager: DWE_DEPLOY_ICEBERG_CATALOG ───────────────────────────
+    - key: VNET_ID
+      description: "Azure VNet ID"
+      destination: secrets_manager
+    - key: APP_GW_SUBNET_ID
+      description: "Subnet ID for Application Gateway"
+      destination: secrets_manager
+    - key: VM_SUBNET_ID
+      description: "Subnet ID for VM instances"
+      destination: secrets_manager
+    - key: SSH_PUBLIC_KEY
+      description: "SSH public key for VM access"
+      destination: secrets_manager
+    - key: DNS_ZONE_NAME
+      description: "Azure DNS zone name (e.g. myorg.com)"
+      destination: secrets_manager
+    - key: DNS_RECORD_NAME
+      description: "DNS record name (e.g. catalog for catalog.myorg.com)"
+      destination: secrets_manager
+    - key: APP_GW_SSL_CERT_KEY_VAULT_ID
+      description: "Key Vault secret ID for TLS certificate (optional)"
+      destination: secrets_manager
+    - key: git_deploy_token
+      description: "Git token for repo clone on VM boot"
+      destination: secrets_manager
+    - key: git_deploy_username
+      description: "Git username for HTTPS clone (e.g. x-token-auth)"
+      destination: secrets_manager
+    - key: NESSIE_DB_PASS
+      description: "Nessie database password — Pulumi creates the PostgreSQL server/RDS instance with this password"
+      destination: secrets_manager
+  optional_secrets:
+    - key: DNS_ZONE_RESOURCE_GROUP
+      description: "Resource group for DNS zone (defaults to RESOURCE_GROUP)"
+      destination: secrets_manager
+    - key: KG_API_HOST
+      description: "Deploy Management API host"
+      destination: secrets_manager
+    - key: KG_API_TOKEN
+      description: "Bearer token for Deploy Management API"
+      destination: secrets_manager
+
+_templates_suffix: .jinja
+
+_exclude:
+  - copier.yml
+  - README.md
+  - .git
+  - .env
+  - __pycache__
+  - "*.pyc"
+  - "*.pyo"
+  - "pulumi/dwe-hydration.yaml"
+
+_skip_if_exists:
+  - .env.example
+
+project_name:
+  type: str
+  help: "Client project slug for cloud resource naming (lowercase, hyphens)"
+  validator: "{% if not (project_name | regex_search('^[a-z][a-z0-9-]+$')) %}Must be lowercase letters, numbers, hyphens{% endif %}"
+
+git_repo_url:
+  type: str
+  default: ""
+  when: false
+
+adapter_name:
+  type: str
+  default: dwe_iceberg_catalog
+  when: false
+
+adapter_version:
+  type: str
+  default: v1.0.0
+  when: false
+
+environments:
+  type: yaml
+  default: "[dev, prod]"
+  help: "List of deployment environments"
+
+cloud_provider:
+  type: str
+  default: azure
+  choices:
+    - azure
+    - aws
+  when: false
+
+azure_location:
+  type: str
+  default: eastus
+  when: false
+
+aws_region:
+  type: str
+  default: us-east-1
+  x_dwe_editable: true
+  x_dwe_per_env: false
+
+instance_type:
+  type: str
+  default: Standard_B2ms
+  help: "VM size. Nessie is lightweight — Standard_B2ms (2 vCPU, 8 GB) is sufficient."
+  x_dwe_editable: true
+  x_dwe_per_env: true
+
+volume_size:
+  type: int
+  default: 32
+  help: "Root volume size in GB."
+  x_dwe_editable: true
+  x_dwe_per_env: true
+
+secret_id:
+  type: str
+  default: "DWE_DEPLOY_ICEBERG_CATALOG"
+  help: "Secret name in Azure Key Vault / AWS Secrets Manager holding all runtime credentials."
+  x_dwe_editable: true
+  x_dwe_per_env: false

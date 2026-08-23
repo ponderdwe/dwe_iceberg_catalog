@@ -1,0 +1,224 @@
+# GitLab CI — two-path deploy for branch {@ ENV_NAME @} → workspace {@ WORKSPACE_NAME @}
+#
+# Path 1 — pulumi/** changed   → pulumi preview (MR) or pulumi up (push)
+# Path 2 — app files changed,  → VMSS reimage
+#           pulumi NOT changed
+#
+# Required CI/CD variables:
+{% if CLOUD_PROVIDER == "azure" %}
+#   AZURE_CLIENT_ID        — Service principal client ID
+#   AZURE_CLIENT_SECRET    — Service principal secret
+#   AZURE_TENANT_ID        — Azure AD tenant ID
+#   AZURE_SUBSCRIPTION_ID  — Azure subscription ID
+#   PULUMI_AZURE_STATE     — Azure Blob Storage URL for Pulumi state
+#   AZURE_STORAGE_ACCOUNT  — Storage account name for Pulumi state backend
+#   RESOURCE_GROUP         — Azure resource group for the VMSS
+#   KEY_VAULT_NAME         — Azure Key Vault holding runtime secrets
+{% else %}
+#   AWS_ACCESS_KEY_ID      — AWS credentials for Pulumi + ASG
+#   AWS_SECRET_ACCESS_KEY  — AWS credentials for Pulumi + ASG
+#   PULUMI_S3_STATE        — S3 backend URL, e.g. s3://my-pulumi-state-bucket
+{% endif %}
+
+stages:
+  - infra
+  - deploy
+
+# ── MR: preview infra changes ─────────────────────────────────────────────────
+pulumi-preview-{@ ENV_NAME @}:
+  stage: infra
+  image: python:3.11-slim
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "{@ ENV_NAME @}"'
+      changes:
+        - pulumi/**/*
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq curl
+    - curl -fsSL https://get.pulumi.com | sh
+    - pip install -r pulumi/requirements.txt
+  script:
+    - export PATH="$HOME/.pulumi/bin:$PATH"
+{% if CLOUD_PROVIDER == "azure" %}
+    - az login --service-principal -u $AZURE_CLIENT_ID -p $AZURE_CLIENT_SECRET --tenant $AZURE_TENANT_ID
+    - pulumi login $PULUMI_AZURE_STATE
+{% else %}
+    - pulumi login $PULUMI_S3_STATE
+{% endif %}
+    - cd pulumi && (pulumi stack select $WORKSPACE 2>/dev/null || pulumi stack init $WORKSPACE)
+    - pulumi preview --stack $WORKSPACE
+  variables:
+{% if CLOUD_PROVIDER == "azure" %}
+    AZURE_CLIENT_ID: $AZURE_CLIENT_ID
+    AZURE_CLIENT_SECRET: $AZURE_CLIENT_SECRET
+    AZURE_TENANT_ID: $AZURE_TENANT_ID
+    AZURE_SUBSCRIPTION_ID: $AZURE_SUBSCRIPTION_ID
+    AZURE_STORAGE_ACCOUNT: $AZURE_STORAGE_ACCOUNT
+{% else %}
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+    AWS_DEFAULT_REGION: "{@ AWS_REGION @}"
+{% endif %}
+    PULUMI_CONFIG_PASSPHRASE: ""
+    WORKSPACE: "{@ WORKSPACE_NAME @}"
+
+# ── Push: apply infra changes ─────────────────────────────────────────────────
+pulumi-apply-{@ ENV_NAME @}:
+  stage: infra
+  image: python:3.11-slim
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "{@ ENV_NAME @}"'
+      changes:
+        - pulumi/**/*
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq curl unzip
+    - curl -fsSL https://get.pulumi.com | sh
+    - pip install -r pulumi/requirements.txt
+{% if CLOUD_PROVIDER == "azure" %}
+    - curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+{% else %}
+    - curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip
+    - unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install
+{% endif %}
+  script:
+    - export PATH="$HOME/.pulumi/bin:$PATH"
+{% if CLOUD_PROVIDER == "azure" %}
+    - az login --service-principal -u $AZURE_CLIENT_ID -p $AZURE_CLIENT_SECRET --tenant $AZURE_TENANT_ID
+    - pulumi login $PULUMI_AZURE_STATE
+{% else %}
+    - pulumi login $PULUMI_S3_STATE
+{% endif %}
+    - cd pulumi && (pulumi stack select $WORKSPACE 2>/dev/null || pulumi stack init $WORKSPACE)
+    - pulumi config set startup_code_version "$CI_COMMIT_SHA" --stack $WORKSPACE
+    - pulumi up --yes --stack $WORKSPACE
+    - |
+{% if CLOUD_PROVIDER == "azure" %}
+      VMSS_NAME=$(az vmss list --resource-group $RESOURCE_GROUP \
+        --query "[?tags.Project=='{@ PROJECT_NAME @}' && tags.Environment=='{@ WORKSPACE_NAME @}' && tags.ManagedBy=='Pulumi'].name | [0]" -o tsv)
+      echo "Reimaging VMSS: $VMSS_NAME"
+      az vmss reimage --resource-group $RESOURCE_GROUP --name $VMSS_NAME --no-wait || true
+      echo "Waiting for VMSS instances to be running..."
+      for i in $(seq 1 40); do
+        STATUS=$(az vmss list-instances --resource-group $RESOURCE_GROUP --name $VMSS_NAME \
+          --query "[0].provisioningState" -o tsv 2>/dev/null || echo "Unknown")
+        echo "  [$i/40] $STATUS"
+        case "$STATUS" in
+          Succeeded) echo "VMSS instance ready."; break ;;
+          Failed) echo "VMSS instance failed"; exit 1 ;;
+        esac
+        [ "$i" -eq 40 ] && { echo "Timeout waiting for VMSS instance"; exit 1; }
+        sleep 30
+      done
+{% else %}
+      ASG_NAME=$(pulumi stack output asg_name --stack $WORKSPACE)
+      echo "Starting instance refresh for ASG: $ASG_NAME"
+      aws autoscaling start-instance-refresh \
+        --auto-scaling-group-name "$ASG_NAME" \
+        --strategy Rolling \
+        --preferences '{"MinHealthyPercentage":0,"InstanceWarmup":300}' 2>&1 || true
+      echo "Waiting for instance refresh..."
+      for i in $(seq 1 40); do
+        STATUS=$(aws autoscaling describe-instance-refreshes \
+          --auto-scaling-group-name "$ASG_NAME" \
+          --query "InstanceRefreshes[0].Status" --output text 2>/dev/null || echo "Pending")
+        echo "  [$i/40] $STATUS"
+        case "$STATUS" in
+          Successful) echo "Instance refresh completed."; break ;;
+          Failed|Cancelled) echo "Instance refresh $STATUS"; exit 1 ;;
+        esac
+        [ "$i" -eq 40 ] && { echo "Timeout waiting for instance refresh"; exit 1; }
+        sleep 30
+      done
+{% endif %}
+  variables:
+{% if CLOUD_PROVIDER == "azure" %}
+    AZURE_CLIENT_ID: $AZURE_CLIENT_ID
+    AZURE_CLIENT_SECRET: $AZURE_CLIENT_SECRET
+    AZURE_TENANT_ID: $AZURE_TENANT_ID
+    AZURE_SUBSCRIPTION_ID: $AZURE_SUBSCRIPTION_ID
+    AZURE_STORAGE_ACCOUNT: $AZURE_STORAGE_ACCOUNT
+    RESOURCE_GROUP: $RESOURCE_GROUP
+    KEY_VAULT_NAME: $KEY_VAULT_NAME
+{% else %}
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+    AWS_DEFAULT_REGION: "{@ AWS_REGION @}"
+{% endif %}
+    PULUMI_CONFIG_PASSPHRASE: ""
+    WORKSPACE: "{@ WORKSPACE_NAME @}"
+
+# ── Push: redeploy app via VMSS reimage / ASG instance refresh (app files only) ─
+deploy-app-{@ ENV_NAME @}:
+  stage: deploy
+  image: python:3.11-slim
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "{@ ENV_NAME @}"'
+      changes:
+        - pulumi/**/*
+      when: never
+    - if: '$CI_COMMIT_BRANCH == "{@ ENV_NAME @}"'
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq curl unzip
+{% if CLOUD_PROVIDER == "azure" %}
+    - curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+{% else %}
+    - curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip
+    - unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install
+{% endif %}
+  script:
+    - |
+{% if CLOUD_PROVIDER == "azure" %}
+      az login --service-principal -u $AZURE_CLIENT_ID -p $AZURE_CLIENT_SECRET --tenant $AZURE_TENANT_ID
+      VMSS_NAME=$(az vmss list --resource-group $RESOURCE_GROUP \
+        --query "[?tags.Project=='{@ PROJECT_NAME @}' && tags.Environment=='{@ WORKSPACE_NAME @}' && tags.ManagedBy=='Pulumi'].name | [0]" -o tsv)
+      echo "Reimaging VMSS: $VMSS_NAME"
+      az vmss reimage --resource-group $RESOURCE_GROUP --name $VMSS_NAME --no-wait || true
+      echo "Waiting for VMSS instances to be running..."
+      for i in $(seq 1 40); do
+        STATUS=$(az vmss list-instances --resource-group $RESOURCE_GROUP --name $VMSS_NAME \
+          --query "[0].provisioningState" -o tsv 2>/dev/null || echo "Unknown")
+        echo "  [$i/40] $STATUS"
+        case "$STATUS" in
+          Succeeded) echo "VMSS instance ready."; break ;;
+          Failed) echo "VMSS instance failed"; exit 1 ;;
+        esac
+        [ "$i" -eq 40 ] && { echo "Timeout waiting for VMSS instance"; exit 1; }
+        sleep 30
+      done
+{% else %}
+      ASG_NAME=$(aws autoscaling describe-auto-scaling-groups \
+        --filters \
+          "Name=tag:Project,Values={@ PROJECT_NAME @}" \
+          "Name=tag:Environment,Values={@ WORKSPACE_NAME @}" \
+          "Name=tag:ManagedBy,Values=Pulumi" \
+        --query "AutoScalingGroups[0].AutoScalingGroupName" --output text)
+      echo "Starting instance refresh for ASG: $ASG_NAME"
+      aws autoscaling start-instance-refresh \
+        --auto-scaling-group-name "$ASG_NAME" \
+        --strategy Rolling \
+        --preferences '{"MinHealthyPercentage":0,"InstanceWarmup":300}' 2>&1 || true
+      echo "Waiting for instance refresh..."
+      for i in $(seq 1 40); do
+        STATUS=$(aws autoscaling describe-instance-refreshes \
+          --auto-scaling-group-name "$ASG_NAME" \
+          --query "InstanceRefreshes[0].Status" --output text 2>/dev/null || echo "Pending")
+        echo "  [$i/40] $STATUS"
+        case "$STATUS" in
+          Successful) echo "Instance refresh completed."; break ;;
+          Failed|Cancelled) echo "Instance refresh $STATUS"; exit 1 ;;
+        esac
+        [ "$i" -eq 40 ] && { echo "Timeout waiting for instance refresh"; exit 1; }
+        sleep 30
+      done
+{% endif %}
+  variables:
+{% if CLOUD_PROVIDER == "azure" %}
+    AZURE_CLIENT_ID: $AZURE_CLIENT_ID
+    AZURE_CLIENT_SECRET: $AZURE_CLIENT_SECRET
+    AZURE_TENANT_ID: $AZURE_TENANT_ID
+    AZURE_SUBSCRIPTION_ID: $AZURE_SUBSCRIPTION_ID
+    RESOURCE_GROUP: $RESOURCE_GROUP
+{% else %}
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+    AWS_DEFAULT_REGION: "{@ AWS_REGION @}"
+{% endif %}

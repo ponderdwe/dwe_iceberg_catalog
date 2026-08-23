@@ -1,0 +1,22 @@
+# Production compose — local dev additions in docker-compose.override.yml
+# Start production:  docker-compose -f docker-compose.yml up -d
+# Start local dev:   docker-compose up -d
+
+services:
+  catalog:
+    image: projectnessie/nessie
+    container_name: catalog
+    restart: unless-stopped
+    ports:
+      - "19120:19120"
+    environment:
+      - NESSIE_VERSION_STORE_TYPE=JDBC
+      - QUARKUS_DATASOURCE_JDBC_URL=${NESSIE_DB_URL}
+      - QUARKUS_DATASOURCE_USERNAME=${NESSIE_DB_USER}
+      - QUARKUS_DATASOURCE_PASSWORD=${NESSIE_DB_PASS}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:19120/api/v2/config || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
