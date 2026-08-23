@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pulumi
 import pulumi_azure_native as azure_native
+import pulumi_azure_native.dbforpostgresql.v20221201 as pg
 import yaml
 from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
@@ -26,6 +27,7 @@ _dwe = yaml.safe_load((Path(__file__).parent / "dwe-hydration.yaml").read_text()
 project_name    = _dwe["project_name"]
 git_repo_url    = _dwe["git_repo_url"]
 adapter_version = _dwe["adapter_version"]
+adapter_name    = _dwe["adapter_name"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stack Config
@@ -42,8 +44,10 @@ resource_group    = config.require("resource_group")
 subscription_id   = config.require("subscription_id")
 app_port          = 19120
 startup_code_version = config.get("startup_code_version") or ""
+create_pg_cluster = (config.get("create_pg_cluster") or "true").lower() == "true"
 
 suffix = f"-{env}" if env != "prod" else ""
+db_name = f"{adapter_name}_{env}"
 tags = {
     "Project":     project_name,
     "ManagedBy":   "Pulumi",
@@ -111,46 +115,54 @@ kv_access = azure_native.authorization.RoleAssignment(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Azure Database for PostgreSQL Flexible Server (Nessie JDBC backend)
+# PostgreSQL backend — either Pulumi-managed or pre-existing (from Key Vault)
 # ─────────────────────────────────────────────────────────────────────────────
-pg_server_name = f"{project_name}-pg{suffix}"
-pg_server = azure_native.dbforpostgresql.FlexibleServer(
-    pg_server_name,
-    resource_group_name=resource_group,
-    server_name=pg_server_name,
-    location=azure_location,
-    sku=azure_native.dbforpostgresql.SkuArgs(
-        name="Standard_B1ms",
-        tier="Burstable",
-    ),
-    administrator_login="nessie",
-    administrator_login_password=nessie_db_pass,
-    version="14",
-    storage=azure_native.dbforpostgresql.StorageArgs(storage_size_gb=32),
-    backup=azure_native.dbforpostgresql.BackupArgs(
-        backup_retention_days=7,
-        geo_redundant_backup="Disabled",
-    ),
-    high_availability=azure_native.dbforpostgresql.HighAvailabilityArgs(mode="Disabled"),
-    tags=tags,
-)
-
-# Firewall rule: 0.0.0.0/0.0.0.0 is the Azure convention for "Allow Azure services"
-azure_native.dbforpostgresql.FirewallRule(
-    f"{project_name}-pg-fw{suffix}",
-    resource_group_name=resource_group,
-    server_name=pg_server.name,
-    firewall_rule_name="AllowAzureServices",
-    start_ip_address="0.0.0.0",
-    end_ip_address="0.0.0.0",
-)
-
-azure_native.dbforpostgresql.Database(
-    f"{project_name}-pg-db{suffix}",
-    resource_group_name=resource_group,
-    server_name=pg_server.name,
-    database_name="nessie",
-)
+pg_server = None
+if create_pg_cluster:
+    pg_server_name = f"{project_name}-pg{suffix}"
+    pg_server = pg.FlexibleServer(
+        pg_server_name,
+        resource_group_name=resource_group,
+        server_name=pg_server_name,
+        location=azure_location,
+        sku=pg.SkuArgs(
+            name="Standard_B1ms",
+            tier="Burstable",
+        ),
+        administrator_login="nessie",
+        administrator_login_password=nessie_db_pass,
+        version="14",
+        storage=pg.StorageArgs(storage_size_gb=32),
+        backup=pg.BackupArgs(
+            backup_retention_days=7,
+            geo_redundant_backup="Disabled",
+        ),
+        high_availability=pg.HighAvailabilityArgs(mode="Disabled"),
+        tags=tags,
+    )
+    # Firewall rule: 0.0.0.0/0.0.0.0 is the Azure convention for "Allow Azure services"
+    pg.FirewallRule(
+        f"{project_name}-pg-fw{suffix}",
+        resource_group_name=resource_group,
+        server_name=pg_server.name,
+        firewall_rule_name="AllowAzureServices",
+        start_ip_address="0.0.0.0",
+        end_ip_address="0.0.0.0",
+    )
+    pg.Database(
+        f"{project_name}-pg-db{suffix}",
+        resource_group_name=resource_group,
+        server_name=pg_server.name,
+        database_name=db_name,
+    )
+    nessie_db_user = "nessie"
+    pg_fqdn_output = pg_server.fully_qualified_domain_name
+else:
+    nessie_db_host = secrets.get("NESSIE_DB_HOST", "")
+    nessie_db_user = secrets.get("NESSIE_DB_USER", "nessie")
+    if not nessie_db_host:
+        raise ValueError("NESSIE_DB_HOST required in Key Vault when create_pg_cluster=false")
+    pg_fqdn_output = pulumi.Output.from_input(nessie_db_host)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Azure Storage Account + Blob Container (Iceberg warehouse, ADLS Gen2/ABFS)
@@ -436,8 +448,8 @@ git -C /home/ubuntu/catalog checkout {git_branch}
 echo "$SECRET_JSON" | jq -r 'to_entries[] | .key + "=" + (.value | tostring)' > /home/ubuntu/catalog/.env
 
 # Append Pulumi-provisioned infra values (DB FQDN and storage key are not in Key Vault)
-echo "NESSIE_DB_URL=jdbc:postgresql://{pg_fqdn}:5432/nessie" >> /home/ubuntu/catalog/.env
-echo "NESSIE_DB_USER=nessie" >> /home/ubuntu/catalog/.env
+echo "NESSIE_DB_URL=jdbc:postgresql://{pg_fqdn}:5432/{db_name}" >> /home/ubuntu/catalog/.env
+echo "NESSIE_DB_USER={nessie_db_user}" >> /home/ubuntu/catalog/.env
 echo "ICEBERG_WAREHOUSE_DIR=abfs://warehouse@{sa_name}.dfs.core.windows.net/" >> /home/ubuntu/catalog/.env
 echo "AZURE_STORAGE_ACCOUNT={sa_name}" >> /home/ubuntu/catalog/.env
 echo "AZURE_STORAGE_KEY={sa_key}" >> /home/ubuntu/catalog/.env
@@ -450,7 +462,7 @@ docker-compose -f docker-compose.yml up -d
     return base64.b64encode(script.encode()).decode()
 
 custom_data = pulumi.Output.all(
-    pg_server.fully_qualified_domain_name,
+    pg_fqdn_output,
     storage_account.name,
     storage_key,
 ).apply(lambda args: _build_user_data(*args))
@@ -525,7 +537,7 @@ vmss = azure_native.compute.VirtualMachineScaleSet(
         ),
     ),
     tags=tags,
-    opts=pulumi.ResourceOptions(depends_on=[app_gw, kv_access, pg_server, storage_account]),
+    opts=pulumi.ResourceOptions(depends_on=[app_gw, kv_access, storage_account] + ([pg_server] if pg_server else [])),
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -611,6 +623,7 @@ pulumi.export("appgw_name",           app_gw.name)
 pulumi.export("vmss_name",            vmss.name)
 pulumi.export("url",                  f"https://{dns_record_name}.{dns_zone_name}")
 pulumi.export("public_ip",            public_ip.ip_address)
-pulumi.export("pg_server_fqdn",       pg_server.fully_qualified_domain_name)
+if pg_server:
+    pulumi.export("pg_server_fqdn",   pg_server.fully_qualified_domain_name)
 pulumi.export("storage_account_name", storage_account.name)
 pulumi.export("environment",          env)

@@ -25,6 +25,7 @@ _dwe = yaml.safe_load((Path(__file__).parent / "dwe-hydration.yaml").read_text()
 project_name    = _dwe["project_name"]
 git_repo_url    = _dwe["git_repo_url"]
 adapter_version = _dwe["adapter_version"]
+adapter_name    = _dwe["adapter_name"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stack Config
@@ -40,6 +41,7 @@ app_port             = 19120
 startup_code_version = config.get("startup_code_version") or ""
 
 suffix = f"-{env}" if env != "prod" else ""
+db_name = f"{adapter_name}_{env}"
 tags = {
     "Project":     project_name,
     "ManagedBy":   "Pulumi",
@@ -173,7 +175,7 @@ rds_instance = aws.rds.Instance(
     engine_version="14",
     instance_class="db.t3.micro",
     allocated_storage=20,
-    db_name="nessie",
+    db_name=db_name,
     username="nessie",
     password=nessie_db_pass,
     db_subnet_group_name=rds_subnet_group.name,
@@ -247,7 +249,7 @@ git -C /home/ubuntu/catalog checkout {git_branch}
 echo "$SECRET_JSON" | jq -r 'to_entries[] | .key + "=" + (.value | tostring)' > /home/ubuntu/catalog/.env
 
 # Append Pulumi-provisioned infra values (RDS endpoint and bucket name are not in Secrets Manager)
-echo "NESSIE_DB_URL=jdbc:postgresql://{rds_endpoint}:5432/nessie" >> /home/ubuntu/catalog/.env
+echo "NESSIE_DB_URL=jdbc:postgresql://{rds_endpoint}:5432/{db_name}" >> /home/ubuntu/catalog/.env
 echo "NESSIE_DB_USER=nessie" >> /home/ubuntu/catalog/.env
 echo "ICEBERG_WAREHOUSE_DIR=s3://{bucket_name}/warehouse" >> /home/ubuntu/catalog/.env
 chmod 600 /home/ubuntu/catalog/.env
