@@ -6,6 +6,7 @@ config:
   {{ project_name }}:volume_size: "32"
   {{ project_name }}:create_pg_cluster: "{{ create_pg_cluster | lower }}"
 {% if cloud_provider == "azure" %}
+  {{ project_name }}:vm_subnet_cidr: {{ vm_subnet_cidr }}
   {{ project_name }}:azure_location: {{ azure_location }}
 {% else %}
   {{ project_name }}:aws_region: {{ aws_region }}

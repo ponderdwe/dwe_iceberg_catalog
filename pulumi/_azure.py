@@ -45,6 +45,7 @@ subscription_id   = config.require("subscription_id")
 app_port          = 19120
 startup_code_version = config.get("startup_code_version") or ""
 create_pg_cluster = (config.get("create_pg_cluster") or "true").lower() == "true"
+vm_subnet_cidr    = config.require("vm_subnet_cidr")
 
 suffix = f"-{env}" if env != "prod" else ""
 db_name = f"{adapter_name}_{env}"
@@ -69,8 +70,12 @@ secrets = get_secret(key_vault_name, secret_id)
 # ── Infrastructure ────────────────────────────────────────────────────────────
 vnet_id            = secrets["VNET_ID"]
 app_gw_subnet_id   = secrets["APP_GW_SUBNET_ID"]
-vm_subnet_id       = secrets["VM_SUBNET_ID"]
 ssh_public_key     = secrets["SSH_PUBLIC_KEY"]
+
+# Parse VNet name and resource group from the full VNet resource ID
+_vnet_parts = vnet_id.split("/")
+vnet_rg   = _vnet_parts[4]
+vnet_name = _vnet_parts[-1]
 
 # ── Networking / DNS ──────────────────────────────────────────────────────────
 dns_zone_name      = secrets["DNS_ZONE_NAME"]
@@ -205,15 +210,16 @@ storage_key = azure_native.storage.list_storage_account_keys_output(
 # (e.g. dwe_trino) can read AZURE_STORAGE_ACCOUNT and AZURE_STORAGE_KEY from there.
 iceberg_output_secret = f"iceberg-metadata-{env}-output"
 
-def _persist_storage_to_kv(sa_name: str, sa_key: str) -> None:
+def _persist_storage_to_kv(sa_name: str, sa_key: str, subnet_id: str) -> None:
     credential = DefaultAzureCredential()
     client = SecretClient(vault_url=f"https://{key_vault_name}.vault.azure.net/", credential=credential)
     client.set_secret(iceberg_output_secret, json.dumps({
         "AZURE_STORAGE_ACCOUNT": sa_name,
         "AZURE_STORAGE_KEY": sa_key,
+        "VM_SUBNET_ID": subnet_id,
     }))
 
-pulumi.Output.all(storage_account.name, storage_key).apply(
+pulumi.Output.all(storage_account.name, storage_key, vm_subnet.id).apply(
     lambda args: _persist_storage_to_kv(*args)
 )
 
@@ -281,6 +287,19 @@ vm_nsg = azure_native.network.NetworkSecurityGroup(
         ),
     ],
     tags=tags,
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VM subnet — created by Pulumi so Trino can be co-located via the output secret
+# ─────────────────────────────────────────────────────────────────────────────
+vm_subnet_name = f"{project_name}-vm-subnet{suffix}"
+vm_subnet = azure_native.network.Subnet(
+    vm_subnet_name,
+    resource_group_name=vnet_rg,
+    virtual_network_name=vnet_name,
+    subnet_name=vm_subnet_name,
+    address_prefix=vm_subnet_cidr,
+    network_security_group=azure_native.network.NetworkSecurityGroupArgs(id=vm_nsg.id),
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -546,7 +565,7 @@ vmss = azure_native.compute.VirtualMachineScaleSet(
                     ip_configurations=[
                         azure_native.compute.VirtualMachineScaleSetIPConfigurationArgs(
                             name=f"{project_name}-ipconfig{suffix}",
-                            subnet=azure_native.compute.ApiEntityReferenceArgs(id=vm_subnet_id),
+                            subnet=azure_native.compute.ApiEntityReferenceArgs(id=vm_subnet.id),
                             application_gateway_backend_address_pools=[
                                 azure_native.network.SubResourceArgs(
                                     id=f"{ag_prefix}/backendAddressPools/backendPool"
@@ -560,7 +579,7 @@ vmss = azure_native.compute.VirtualMachineScaleSet(
         ),
     ),
     tags=tags,
-    opts=pulumi.ResourceOptions(depends_on=[app_gw, kv_access, storage_account] + ([pg_server] if pg_server else [])),
+    opts=pulumi.ResourceOptions(depends_on=[app_gw, kv_access, storage_account, vm_subnet] + ([pg_server] if pg_server else [])),
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
