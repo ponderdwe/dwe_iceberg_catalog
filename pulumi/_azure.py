@@ -249,13 +249,13 @@ app_gw_nsg = azure_native.network.NetworkSecurityGroup(
             name="AllowHTTP",
             priority=100, direction="Inbound", access="Allow", protocol="Tcp",
             source_port_range="*", destination_port_range="80",
-            source_address_prefix="*", destination_address_prefix="*",
+            source_address_prefix=vm_subnet_cidr, destination_address_prefix="*",
         ),
         azure_native.network.SecurityRuleArgs(
             name="AllowHTTPS",
             priority=110, direction="Inbound", access="Allow", protocol="Tcp",
             source_port_range="*", destination_port_range="443",
-            source_address_prefix="*", destination_address_prefix="*",
+            source_address_prefix=vm_subnet_cidr, destination_address_prefix="*",
         ),
         azure_native.network.SecurityRuleArgs(
             name="AllowGatewayManager",
