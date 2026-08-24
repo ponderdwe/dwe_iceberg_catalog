@@ -206,22 +206,7 @@ storage_key = azure_native.storage.list_storage_account_keys_output(
     account_name=storage_account.name,
 ).apply(lambda r: r.keys[0].value)
 
-# Publish storage credentials to a dedicated output secret so downstream adapters
-# (e.g. dwe_trino) can read AZURE_STORAGE_ACCOUNT and AZURE_STORAGE_KEY from there.
 iceberg_output_secret = f"iceberg-metadata-{env}-output"
-
-def _persist_storage_to_kv(sa_name: str, sa_key: str, subnet_id: str) -> None:
-    credential = DefaultAzureCredential()
-    client = SecretClient(vault_url=f"https://{key_vault_name}.vault.azure.net/", credential=credential)
-    client.set_secret(iceberg_output_secret, json.dumps({
-        "AZURE_STORAGE_ACCOUNT": sa_name,
-        "AZURE_STORAGE_KEY": sa_key,
-        "VM_SUBNET_ID": subnet_id,
-    }))
-
-pulumi.Output.all(storage_account.name, storage_key, vm_subnet.id).apply(
-    lambda args: _persist_storage_to_kv(*args)
-)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Public IP for Application Gateway
@@ -300,6 +285,21 @@ vm_subnet = azure_native.network.Subnet(
     subnet_name=vm_subnet_name,
     address_prefix=vm_subnet_cidr,
     network_security_group=azure_native.network.NetworkSecurityGroupArgs(id=vm_nsg.id),
+)
+
+# Publish storage credentials + subnet ID to a dedicated output secret so downstream
+# adapters (e.g. dwe_trino) can read AZURE_STORAGE_ACCOUNT, AZURE_STORAGE_KEY, VM_SUBNET_ID.
+def _persist_storage_to_kv(sa_name: str, sa_key: str, subnet_id: str) -> None:
+    credential = DefaultAzureCredential()
+    client = SecretClient(vault_url=f"https://{key_vault_name}.vault.azure.net/", credential=credential)
+    client.set_secret(iceberg_output_secret, json.dumps({
+        "AZURE_STORAGE_ACCOUNT": sa_name,
+        "AZURE_STORAGE_KEY": sa_key,
+        "VM_SUBNET_ID": subnet_id,
+    }))
+
+pulumi.Output.all(storage_account.name, storage_key, vm_subnet.id).apply(
+    lambda args: _persist_storage_to_kv(*args)
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
