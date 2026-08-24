@@ -194,6 +194,22 @@ storage_key = azure_native.storage.list_storage_account_keys_output(
     account_name=storage_account.name,
 ).apply(lambda r: r.keys[0].value)
 
+# Publish storage credentials to a dedicated output secret so downstream adapters
+# (e.g. dwe_trino) can read AZURE_STORAGE_ACCOUNT and AZURE_STORAGE_KEY from there.
+iceberg_output_secret = f"iceberg-metadata-{env}-output"
+
+def _persist_storage_to_kv(sa_name: str, sa_key: str) -> None:
+    credential = DefaultAzureCredential()
+    client = SecretClient(vault_url=f"https://{key_vault_name}.vault.azure.net/", credential=credential)
+    client.set_secret(iceberg_output_secret, json.dumps({
+        "AZURE_STORAGE_ACCOUNT": sa_name,
+        "AZURE_STORAGE_KEY": sa_key,
+    }))
+
+pulumi.Output.all(storage_account.name, storage_key).apply(
+    lambda args: _persist_storage_to_kv(*args)
+)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Public IP for Application Gateway
 # ─────────────────────────────────────────────────────────────────────────────
@@ -619,11 +635,12 @@ if _kg_host and _kg_token and _kg_mappings:
 # ─────────────────────────────────────────────────────────────────────────────
 # Outputs
 # ─────────────────────────────────────────────────────────────────────────────
-pulumi.export("appgw_name",           app_gw.name)
-pulumi.export("vmss_name",            vmss.name)
-pulumi.export("url",                  f"https://{dns_record_name}.{dns_zone_name}")
-pulumi.export("public_ip",            public_ip.ip_address)
+pulumi.export("appgw_name",            app_gw.name)
+pulumi.export("vmss_name",             vmss.name)
+pulumi.export("url",                   f"https://{dns_record_name}.{dns_zone_name}")
+pulumi.export("public_ip",             public_ip.ip_address)
 if pg_server:
-    pulumi.export("pg_server_fqdn",   pg_server.fully_qualified_domain_name)
-pulumi.export("storage_account_name", storage_account.name)
-pulumi.export("environment",          env)
+    pulumi.export("pg_server_fqdn",    pg_server.fully_qualified_domain_name)
+pulumi.export("storage_account_name",  storage_account.name)
+pulumi.export("iceberg_output_secret", iceberg_output_secret)
+pulumi.export("environment",           env)
