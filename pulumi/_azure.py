@@ -163,6 +163,13 @@ else:
     if not nessie_db_host:
         raise ValueError("NESSIE_DB_HOST required in Key Vault when create_pg_cluster=false")
     pg_fqdn_output = pulumi.Output.from_input(nessie_db_host)
+    # Create the database on the existing server (server name = first segment of FQDN)
+    pg.Database(
+        f"{project_name}-pg-db{suffix}",
+        resource_group_name=resource_group,
+        server_name=nessie_db_host.split(".")[0],
+        database_name=db_name,
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Azure Storage Account + Blob Container (Iceberg warehouse, ADLS Gen2/ABFS)
