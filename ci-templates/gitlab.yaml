@@ -222,3 +222,81 @@ deploy-app-{@ ENV_NAME @}:
     AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
     AWS_DEFAULT_REGION: "{@ AWS_REGION @}"
 {% endif %}
+
+# ── MR: preview what would be destroyed ──────────────────────────────────────
+pulumi-destroy-preview-{@ ENV_NAME @}:
+  stage: infra
+  image: python:3.11-slim
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "dehydrate/{@ ENV_NAME @}"'
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq curl
+    - curl -fsSL https://get.pulumi.com | sh
+    - pip install -r pulumi/requirements.txt
+  script:
+    - export PATH="$HOME/.pulumi/bin:$PATH"
+{% if CLOUD_PROVIDER == "azure" %}
+    - az login --service-principal -u $AZURE_CLIENT_ID -p $AZURE_CLIENT_SECRET --tenant $AZURE_TENANT_ID
+    - pulumi login $PULUMI_AZURE_STATE
+{% else %}
+    - pulumi login $PULUMI_S3_STATE
+{% endif %}
+    - |
+      cd pulumi
+      pulumi stack select $WORKSPACE 2>/dev/null || { echo "Stack not found — nothing to destroy"; exit 0; }
+      pulumi preview --destroy --stack $WORKSPACE
+  variables:
+{% if CLOUD_PROVIDER == "azure" %}
+    AZURE_CLIENT_ID: $AZURE_CLIENT_ID
+    AZURE_CLIENT_SECRET: $AZURE_CLIENT_SECRET
+    AZURE_TENANT_ID: $AZURE_TENANT_ID
+    AZURE_SUBSCRIPTION_ID: $AZURE_SUBSCRIPTION_ID
+{% else %}
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+    AWS_DEFAULT_REGION: "{@ AWS_REGION @}"
+{% endif %}
+    PULUMI_CONFIG_PASSPHRASE: ""
+    WORKSPACE: "{@ WORKSPACE_NAME @}"
+
+# ── Push to dehydrate branch: destroy all resources ───────────────────────────
+pulumi-destroy-{@ ENV_NAME @}:
+  stage: infra
+  image: python:3.11-slim
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dehydrate/{@ ENV_NAME @}"'
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq curl unzip
+    - curl -fsSL https://get.pulumi.com | sh
+    - pip install -r pulumi/requirements.txt
+{% if CLOUD_PROVIDER == "azure" %}
+    - curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+{% else %}
+    - curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip
+    - unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install
+{% endif %}
+  script:
+    - export PATH="$HOME/.pulumi/bin:$PATH"
+{% if CLOUD_PROVIDER == "azure" %}
+    - az login --service-principal -u $AZURE_CLIENT_ID -p $AZURE_CLIENT_SECRET --tenant $AZURE_TENANT_ID
+    - pulumi login $PULUMI_AZURE_STATE
+{% else %}
+    - pulumi login $PULUMI_S3_STATE
+{% endif %}
+    - |
+      cd pulumi
+      pulumi stack select $WORKSPACE 2>/dev/null || { echo "Stack not found — nothing to destroy"; exit 0; }
+      pulumi destroy --yes --stack $WORKSPACE
+  variables:
+{% if CLOUD_PROVIDER == "azure" %}
+    AZURE_CLIENT_ID: $AZURE_CLIENT_ID
+    AZURE_CLIENT_SECRET: $AZURE_CLIENT_SECRET
+    AZURE_TENANT_ID: $AZURE_TENANT_ID
+    AZURE_SUBSCRIPTION_ID: $AZURE_SUBSCRIPTION_ID
+{% else %}
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+    AWS_DEFAULT_REGION: "{@ AWS_REGION @}"
+{% endif %}
+    PULUMI_CONFIG_PASSPHRASE: ""
+    WORKSPACE: "{@ WORKSPACE_NAME @}"

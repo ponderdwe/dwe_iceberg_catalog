@@ -86,6 +86,9 @@ _dwe_hub:
     - key: APP_GW_SUBNET_ID
       description: "Subnet ID for Application Gateway"
       destination: secrets_manager
+    - key: VM_SUBNET_ID
+      description: "Subnet ID for VM instances"
+      destination: secrets_manager
     - key: SSH_PUBLIC_KEY
       description: "SSH public key for VM access"
       destination: secrets_manager
@@ -211,8 +214,3 @@ secret_id:
   x_dwe_editable: true
   x_dwe_per_env: false
 
-vm_subnet_cidr:
-  type: str
-  help: "CIDR block for the VM subnet Pulumi will create (e.g. 10.0.2.0/24). Must not overlap existing subnets in the VNet."
-  x_dwe_editable: true
-  x_dwe_per_env: false

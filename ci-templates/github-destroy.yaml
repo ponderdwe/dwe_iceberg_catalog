@@ -1,0 +1,120 @@
+# GitHub Actions — destroy Pulumi resources for workspace {@ WORKSPACE_NAME @}
+#
+# Trigger: push (or PR) to branch  dehydrate/{@ ENV_NAME @}
+#
+# Workflow:
+#   PR → preview what will be destroyed (pulumi preview --destroy)
+#   Push → destroy all cloud resources (pulumi destroy --yes)
+#
+# To dehydrate an environment:
+#   git checkout -b dehydrate/{@ ENV_NAME @} && git push origin dehydrate/{@ ENV_NAME @}
+#
+# WARNING: this permanently deletes all cloud resources managed by Pulumi
+# for the {@ WORKSPACE_NAME @} workspace.
+
+name: Destroy — {@ ENV_NAME @}
+
+on:
+  push:
+    branches: ["dehydrate/{@ ENV_NAME @}"]
+  pull_request:
+    branches: ["dehydrate/{@ ENV_NAME @}"]
+
+env:
+  WORKSPACE: {@ WORKSPACE_NAME @}
+  SM_SECRET: {@ SECRET_NAME @}
+
+jobs:
+  # ── PR: preview what would be destroyed ───────────────────────────────────
+  pulumi-destroy-preview:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+        working-directory: pulumi
+      - name: Install Pulumi CLI
+        run: curl -fsSL https://get.pulumi.com | sh && echo "$HOME/.pulumi/bin" >> $GITHUB_PATH
+{% if CLOUD_PROVIDER == "azure" %}
+      - uses: azure/login@v2
+        with:
+          creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}"}'
+      - name: Preview destroy
+        run: |
+          pulumi login ${{ secrets.PULUMI_AZURE_STATE }}
+          cd pulumi
+          pulumi stack select ${{ env.WORKSPACE }} 2>/dev/null || { echo "Stack not found — nothing to destroy"; exit 0; }
+          pulumi preview --destroy --stack ${{ env.WORKSPACE }}
+        env:
+          AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          PULUMI_CONFIG_PASSPHRASE: ""
+{% else %}
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: {@ AWS_REGION @}
+      - name: Preview destroy
+        run: |
+          cd pulumi
+          pulumi login $PULUMI_BACKEND_URL
+          pulumi stack select ${{ env.WORKSPACE }} 2>/dev/null || { echo "Stack not found — nothing to destroy"; exit 0; }
+          pulumi preview --destroy --stack ${{ env.WORKSPACE }}
+        env:
+          PULUMI_BACKEND_URL: ${{ secrets.PULUMI_S3_STATE }}
+          PULUMI_CONFIG_PASSPHRASE: ""
+{% endif %}
+
+  # ── Push: destroy all resources ────────────────────────────────────────────
+  pulumi-destroy:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+        working-directory: pulumi
+      - name: Install Pulumi CLI
+        run: curl -fsSL https://get.pulumi.com | sh && echo "$HOME/.pulumi/bin" >> $GITHUB_PATH
+{% if CLOUD_PROVIDER == "azure" %}
+      - uses: azure/login@v2
+        with:
+          creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}"}'
+      - name: Pulumi destroy
+        run: |
+          pulumi login ${{ secrets.PULUMI_AZURE_STATE }}
+          cd pulumi
+          pulumi stack select ${{ env.WORKSPACE }} 2>/dev/null || { echo "Stack not found — nothing to destroy"; exit 0; }
+          pulumi destroy --yes --stack ${{ env.WORKSPACE }}
+        env:
+          AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          PULUMI_CONFIG_PASSPHRASE: ""
+{% else %}
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: {@ AWS_REGION @}
+      - name: Pulumi destroy
+        run: |
+          cd pulumi
+          pulumi login $PULUMI_BACKEND_URL
+          pulumi stack select ${{ env.WORKSPACE }} 2>/dev/null || { echo "Stack not found — nothing to destroy"; exit 0; }
+          pulumi destroy --yes --stack ${{ env.WORKSPACE }}
+        env:
+          PULUMI_BACKEND_URL: ${{ secrets.PULUMI_S3_STATE }}
+          PULUMI_CONFIG_PASSPHRASE: ""
+{% endif %}
